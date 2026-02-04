@@ -63,7 +63,7 @@ show_menu() {
     echo "3) Create HTTPS/TLS Cert (Standard)"
     echo "4) Create mTLS Certs (Server + Client)"
     echo "5) Create CSR for external CA"
-    echo "6) Crate Keystore (Tomcat) e Chain (Apache)"
+    echo "6) Create Keystore (Tomcat) e Chain (Apache)"
     echo "q) Quit"
     echo "------------------------------------------------"
     read -p "Choose desired task: " opt
@@ -111,6 +111,20 @@ while true; do
             openssl x509 -req -in csr/$domain.csr -CA certs/$ca_crt -CAkey private/$ca_key -CAcreateserial \
                 -extfile config/$domain.cnf -extensions $ext -days $DAYS -out certs/$domain.crt
             echo "Certificato $ext generato."
+            ;;
+
+        5) # CSR EXTERNAL
+            read -p "Dominio (es. app.lan): " domain
+            read -p "IP (es. 10.0.0.1 o lasciare vuoto): " ip
+
+            alts="DNS:$domain,DNS:*.$domain"
+            [[ ! -z "$ip" ]] && alts+=",IP:$ip"
+
+            ext="v3_srv"
+            generate_cnf "$ext" "$domain" "$alts"
+            openssl genpkey $KEY_PARAM -out private/$domain.key
+            openssl req -new -key private/$domain.key -config config/$domain.cnf -out csr/$domain.csr
+            echo "CSR creato: csr/$domain.csr"
             ;;
 
         6) # KEYSTORE & CHAIN
