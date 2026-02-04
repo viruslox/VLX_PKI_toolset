@@ -1,0 +1,12 @@
+# Ignore everything
+*
+
+# Whitelist directories (to allow traversing)
+!*/
+
+# Whitelist scripts and project files
+!*.sh
+!README.md
+!LICENSE
+!.gitignore
+!.git/
