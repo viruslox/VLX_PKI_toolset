@@ -76,8 +76,8 @@ function ensure_dirs {
 }
 
 function ask_subject_details {
-    local def_c="IT"
-    local def_o="MiaAzienda"
+    local def_c="${1:-IT}"
+    local def_o="${2:-MiaAzienda}"
 
     echo "Default Subject: C=$def_c, O=$def_o"
     read -p "Customize Subject? [y/N]: " yn
@@ -94,12 +94,23 @@ function ask_subject_details {
 
 function collect_sans {
     local domain=$1
+    local extra_dns=$2
+    local extra_ips=$3
     local dns_list=()
     local ip_list=()
 
     # Defaults
     dns_list+=("$domain")
     dns_list+=("*.$domain")
+
+    # Add extra SANs if provided
+    for d in $extra_dns; do
+        if [ -n "$d" ]; then dns_list+=("$d"); fi
+    done
+
+    for i in $extra_ips; do
+        if [ -n "$i" ]; then ip_list+=("$i"); fi
+    done
 
     while true; do
          echo "Current SANs:"
@@ -283,6 +294,36 @@ function select_ca {
     done
 }
 
+function parse_config {
+    local cnf_file=$1
+    if [ ! -f "$cnf_file" ]; then
+        echo "Error: Config file $cnf_file not found." >&2
+        return 1
+    fi
+
+    # Reset globals
+    PARSE_C=""
+    PARSE_O=""
+    PARSE_CN=""
+    PARSE_DNS=""
+    PARSE_IPS=""
+
+    # Extract values
+    PARSE_C=$(grep "C =" "$cnf_file" | head -n 1 | cut -d= -f2 | sed 's/^[ \t]*//;s/[ \t]*$//')
+    PARSE_O=$(grep "O =" "$cnf_file" | head -n 1 | cut -d= -f2 | sed 's/^[ \t]*//;s/[ \t]*$//')
+    PARSE_CN=$(grep "CN =" "$cnf_file" | head -n 1 | cut -d= -f2 | sed 's/^[ \t]*//;s/[ \t]*$//')
+
+    # Read DNS SANs
+    local dns_lines
+    mapfile -t dns_lines < <(grep "^DNS\." "$cnf_file" | cut -d= -f2 | sed 's/^[ \t]*//;s/[ \t]*$//')
+    PARSE_DNS="${dns_lines[*]}" # Space separated string
+
+    # Read IP SANs
+    local ip_lines
+    mapfile -t ip_lines < <(grep "^IP\." "$cnf_file" | cut -d= -f2 | sed 's/^[ \t]*//;s/[ \t]*$//')
+    PARSE_IPS="${ip_lines[*]}" # Space separated string
+}
+
 # --- Core PKI Logic ---
 
 function create_root_ca {
@@ -431,6 +472,10 @@ function create_leaf_cert {
     local leafs=()
     mapfile -t leafs < <(list_leafs)
     local domain=""
+    local use_c=""
+    local use_o=""
+    local extra_dns=""
+    local extra_ips=""
 
     if [ ${#leafs[@]} -gt 0 ]; then
          echo "------------------------------------------------"
@@ -442,12 +487,36 @@ function create_leaf_cert {
          done
          echo "------------------------------------------------"
 
-         read -p "Do you want to (c)reate a NEW Certificate or (u)pdate/overwrite an existing one? [c/u]: " action
+         read -p "Do you want to (c)reate a NEW Certificate, (u)pdate an existing one, or (r)euse an existing config? [c/u/r]: " action
          if [ "$action" == "u" ]; then
              PS3="Select Certificate to update: "
              select l in "${leafs[@]}"; do
                  if [ -n "$l" ]; then
                      domain="${l%.crt}"
+                     break
+                 else
+                     echo "Invalid selection."
+                 fi
+             done
+         elif [ "$action" == "r" ]; then
+             PS3="Select Certificate to reuse config from: "
+             select l in "${leafs[@]}"; do
+                 if [ -n "$l" ]; then
+                     local base_cert="${l%.crt}"
+                     parse_config "config/$base_cert.cnf"
+                     if [ $? -ne 0 ]; then return; fi
+
+                     # Filter DNS
+                     for d in $PARSE_DNS; do
+                         if [[ "$d" != "$PARSE_CN" && "$d" != "*.$PARSE_CN" ]]; then
+                             extra_dns+="$d "
+                         fi
+                     done
+                     extra_ips="$PARSE_IPS"
+                     use_c="$PARSE_C"
+                     use_o="$PARSE_O"
+
+                     read -p "Domain (e.g. app.lan): " domain
                      break
                  else
                      echo "Invalid selection."
@@ -464,7 +533,7 @@ function create_leaf_cert {
 
     if [ -z "$domain" ]; then echo "Operation cancelled."; return; fi
 
-    collect_sans "$domain"
+    collect_sans "$domain" "$extra_dns" "$extra_ips"
 
     # Select Signing CA
     echo "------------------------------------------------"
@@ -479,7 +548,7 @@ function create_leaf_cert {
         return
     fi
 
-    ask_subject_details
+    ask_subject_details "$use_c" "$use_o"
     local enc=$(get_enc_opt)
 
     generate_cnf "$ext" "$domain" "$SAN_BLOCK" "$CONF_C" "$CONF_O"
