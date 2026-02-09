@@ -75,13 +75,79 @@ function ensure_dirs {
     mkdir -p certs private csr config
 }
 
+function ask_subject_details {
+    local def_c="IT"
+    local def_o="MiaAzienda"
+
+    echo "Default Subject: C=$def_c, O=$def_o"
+    read -p "Customize Subject? [y/N]: " yn
+    if [[ "$yn" =~ ^[Yy] ]]; then
+        read -p "Country (C) [$def_c]: " user_c
+        read -p "Organization (O) [$def_o]: " user_o
+        CONF_C="${user_c:-$def_c}"
+        CONF_O="${user_o:-$def_o}"
+    else
+        CONF_C="$def_c"
+        CONF_O="$def_o"
+    fi
+}
+
+function collect_sans {
+    local domain=$1
+    local dns_list=()
+    local ip_list=()
+
+    # Defaults
+    dns_list+=("$domain")
+    dns_list+=("*.$domain")
+
+    while true; do
+         echo "Current SANs:"
+         echo "  DNS: ${dns_list[*]}"
+         echo "  IP:  ${ip_list[*]}"
+         read -p "Do you want to add another Subject Alternative Name (SAN)? [y/N]: " add_san
+         if [[ ! "$add_san" =~ ^[Yy] ]]; then break; fi
+
+         echo "Type: 1) DNS  2) IP"
+         read -p "Select type: " stype
+         if [ "$stype" == "1" ]; then
+             read -p "Enter DNS name: " val
+             if [ -n "$val" ]; then dns_list+=("$val"); fi
+         elif [ "$stype" == "2" ]; then
+             read -p "Enter IP address: " val
+             if [ -n "$val" ]; then ip_list+=("$val"); fi
+         fi
+    done
+
+    # Build block
+    SAN_BLOCK=$'[ alt_names ]'
+    local i=1
+    for d in "${dns_list[@]}"; do
+        SAN_BLOCK+=$'\n'"DNS.$i = $d"
+        ((i++))
+    done
+
+    local j=1
+    for ip in "${ip_list[@]}"; do
+        SAN_BLOCK+=$'\n'"IP.$j = $ip"
+        ((j++))
+    done
+}
+
 function generate_cnf {
     local type=$1 # root, inter, server, client
     local cn=$2
-    local alt_names=$3
+    local san_block=$3
+    local c_val=$4
+    local o_val=$5
 
     # Ensure config dir exists
     mkdir -p config
+
+    local san_line=""
+    if [ -n "$san_block" ]; then
+        san_line="subjectAltName = @alt_names"
+    fi
 
     cat <<EOF > config/$cn.cnf
 [req]
@@ -89,8 +155,8 @@ distinguished_name = req_distinguished_name
 prompt = no
 
 [req_distinguished_name]
-C = IT
-O = MiaAzienda
+C = $c_val
+O = $o_val
 CN = $cn
 
 [v3_ca]
@@ -106,13 +172,12 @@ basicConstraints = critical, CA:true
 keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 
 [v3_srv]
-network_auth = serverAuth
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = $alt_names
+$san_line
 
 [v3_mtls]
 subjectKeyIdentifier = hash
@@ -120,8 +185,12 @@ authorityKeyIdentifier = keyid:always,issuer
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth, clientAuth
-subjectAltName = $alt_names
+$san_line
 EOF
+
+    if [ -n "$san_block" ]; then
+        echo "$san_block" >> config/$cn.cnf
+    fi
 }
 
 # Check if user wants to password protect the key
@@ -256,9 +325,10 @@ function create_root_ca {
 
     if [ -z "$cn" ]; then echo "Operation cancelled."; return; fi
 
+    ask_subject_details
     local enc=$(get_enc_opt)
 
-    generate_cnf root "$cn" ""
+    generate_cnf root "$cn" "" "$CONF_C" "$CONF_O"
     echo "Generating key..."
     openssl genpkey $KEY_PARAM -out private/$cn.key $enc
     echo "Generating certificate..."
@@ -328,9 +398,10 @@ function create_intermediate_ca {
         return
     fi
 
+    ask_subject_details
     local enc=$(get_enc_opt)
 
-    generate_cnf inter "$cn" ""
+    generate_cnf inter "$cn" "" "$CONF_C" "$CONF_O"
     echo "Generating key..."
     openssl genpkey $KEY_PARAM -out private/$cn.key $enc
     echo "Generating CSR..."
@@ -393,10 +464,7 @@ function create_leaf_cert {
 
     if [ -z "$domain" ]; then echo "Operation cancelled."; return; fi
 
-    read -p "IP (e.g. 10.0.0.1 or leave empty): " ip
-
-    local alts="DNS:$domain,DNS:*.$domain"
-    [[ ! -z "$ip" ]] && alts+=",IP:$ip"
+    collect_sans "$domain"
 
     # Select Signing CA
     echo "------------------------------------------------"
@@ -411,9 +479,10 @@ function create_leaf_cert {
         return
     fi
 
+    ask_subject_details
     local enc=$(get_enc_opt)
 
-    generate_cnf "$ext" "$domain" "$alts"
+    generate_cnf "$ext" "$domain" "$SAN_BLOCK" "$CONF_C" "$CONF_O"
     echo "Generating key..."
     openssl genpkey $KEY_PARAM -out private/$domain.key $enc
     echo "Generating CSR..."
@@ -427,15 +496,14 @@ function create_leaf_cert {
 function create_csr_external {
     ensure_dirs
     read -p "Domain (e.g. app.lan): " domain
-    read -p "IP (e.g. 10.0.0.1 or leave empty): " ip
 
-    local alts="DNS:$domain,DNS:*.$domain"
-    [[ ! -z "$ip" ]] && alts+=",IP:$ip"
+    collect_sans "$domain"
 
     local ext="v3_srv"
+    ask_subject_details
     local enc=$(get_enc_opt)
 
-    generate_cnf "$ext" "$domain" "$alts"
+    generate_cnf "$ext" "$domain" "$SAN_BLOCK" "$CONF_C" "$CONF_O"
     echo "Generating key..."
     openssl genpkey $KEY_PARAM -out private/$domain.key $enc
     echo "Generating CSR..."
