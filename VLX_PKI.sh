@@ -70,9 +70,9 @@ function update_repo {
 }
 
 # --- PKI Helper Functions ---
-
 function ensure_dirs {
     mkdir -p certs private csr config
+    chmod 700 private
 }
 
 function ask_subject_details {
